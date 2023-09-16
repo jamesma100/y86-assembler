@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import argparse
+import bitstring
+from enum import Enum
 
 REG = {
     "%rax": 0x0,
@@ -45,36 +47,100 @@ OP = {
     "irmovq": 0x30F,
     "rmmovq": 0x40,
     "mrmovq": 0x50,
+    "halt": 0x00,
+    "nop": 0x10,
+    "call": 0x80,
+    "ret": 0x90,
+    "pushq": 0xA0,
+    "popq": 0xB0,
 }
 
 
+class CC(Enum):
+    ZF = 0
+    SF = 1
+    OF = 2
+
+
+HEXBASE = 16
+CC = 0
+RSP = 0x100
+
+
+def encode_word(word: str) -> int:
+    """Given a hex word (without the 0x prefix) as a string, returns
+    the little endian byte representation as an integer.
+    """
+    ba = bytearray.fromhex(word)
+    ba.reverse()
+    s = "".join(format(x, "02x") for x in ba)
+    return int(s, HEXBASE)
+
+
+def update_encoding(encoding: int, shift: int, val: int) -> int:
+    """Updates encoding given a value and hex shift (0 means 1 left shift)"""
+    return encoding * (HEXBASE**HEXBASE**shift) + val
+
+
 def parse_contents(filename: str, out: str):
+    """Compile contents of y86_64 assembly into its byte encoding"""
+    global RSP
+    loop_addr = 0x100
     with open(filename, "r") as f:
         encodings = []
         for line in f.readlines():
             line = line.strip()
-            instr, reg_and_word = line.split(" ")
-            word, reg = reg_and_word.split(",")
+            split0 = line.split(" ")
+            instr = split0[0]
+            operand0, operand1 = None, None
+            if len(split0) == 2:
+                operands = split0[1].split(",")
+                operand0 = operands[0]
+                if len(operands) == 2:
+                    operand1 = operands[1]
 
+            if instr == "loop":
+                loop_addr = RSP
+                encodings.append((hex(RSP), ""))
+                continue
             encoding = OP[instr]
 
-            if instr == "irmovq":
-                encoding = encoding * 16 + int(f"{REG[reg]:#0{4}x}", 16)
-                word = word[1:]
-                hex_num = f"{int(word):#0{18}x}"
-                ba = bytearray.fromhex(hex_num[2:])
-                ba.reverse()
-                s = "".join(format(x, "02x") for x in ba)
-                encoding = encoding * 16**16 + int(s, 16)
-            elif instr == "rrmovq":
-                encoding = encoding * 16 + REG[word]
-                encoding = encoding * 16 + REG[reg]
+            if instr in ["halt", "nop", "ret"]:
+                pass
+            elif instr == "irmovq":
+                encoding = encoding * HEXBASE + int(f"{REG[operand1]:#0{4}x}", HEXBASE)
+                operand0 = operand0[1:]
+                hex_word = f"{int(operand0):#0{HEXBASE + 2}x}"
+                encoding = encoding * HEXBASE**16 + encode_word(hex_word[2:])
+            elif instr in ["rrmovq", "addq", "subq", "andq", "xorq"]:
+                encoding = encoding * HEXBASE + REG[operand0]
+                encoding = encoding * HEXBASE + REG[operand1]
+            elif instr == "rmmovq":
+                operand1 = operand1.split("(")
+                word, operand1 = int(operand1[0]), operand1[1][:-1]
+                encoding = encoding * HEXBASE + REG[operand0]
+                encoding = encoding * HEXBASE + REG[operand1]
+                hex_word = bitstring.BitArray(f"int:64={word}").hex
+                encoding = encoding * HEXBASE**16 + encode_word(hex_word)
+            elif instr == "mrmovq":
+                operand0 = operand0.split("(")
+                word, operand0 = int(operand0[0]), operand0[1][:-1]
+                encoding = encoding * HEXBASE + REG[operand0]
+                encoding = encoding * HEXBASE + REG[operand1]
+                hex_word = bitstring.BitArray(f"int:64={word}").hex
+                encoding = encoding * HEXBASE**16 + encode_word(hex_word)
+            elif instr in ["pushq", "popq"]:
+                encoding = encoding * HEXBASE**2 + REG[operand0] * HEXBASE + 0xF
+            elif instr == "jmp":
+                word = f"{loop_addr:#0{16 + 2}x}"
+                encoding = encoding * HEXBASE**16 + encode_word(word[2:])
 
-            encodings.append(hex(encoding))
+            encodings.append((hex(RSP), hex(encoding)))
+            RSP += (len(hex(encoding)) - 2) // 2
 
         with open(out, "w") as f:
-            for encoding in encodings:
-                f.write(encoding[2:] + "\n")
+            for addr, encoding in encodings:
+                f.write(addr + ": " + encoding[2:] + "\n")
 
 
 def parse_args():
